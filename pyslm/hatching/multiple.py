@@ -1,9 +1,10 @@
+from pyslm.hatching.hatching import Hatcher
 from typing import Any 
 
 # TODO: Probably cleaner to take a list of 2-tuples in. Not a big deal though.
 # TODO: Figure out actual types here instead of being lazy and doing Any. Just for type hints and doesn't affect runtime, but this is a library and supposed to be readable and maintainable.
 # TODO: Finish documentation 
-def hatch_multiple(hatchers: list, geometry: Any, defaultHatcher: Any) -> None: 
+def hatch_multiple(default_hatcher: Hatcher, hatcher_area_pairs: tuple[Hatcher, list], geometry: Any) -> None: 
     """Given an array of pairs of hatchers and associated areas for them to hatch, returns 
 
     :param geometry: 
@@ -15,17 +16,20 @@ def hatch_multiple(hatchers: list, geometry: Any, defaultHatcher: Any) -> None:
     :type hatchers: list
     """
 
-    raise NotImplementedError("TODO: Implement!")
-
     # 1. Iterate through Hatchers, getting hatching result then trimming result to associated area 
+    for hatcher_area_pair in hatcher_area_pairs:
+        layer = hatcher_area_pair[0].hatch(geometry)
+        trim_layer_to_inside_area(layer, hatcher_area_pair[1])
 
     # 2. Run default hatcher and trim out any areas that 
+    default_hatches = default_hatcher.hatch()
+    trim_layer_to_outside_areas(layer, hatcher_area_pairs)
 
     # 3. Concatenate all vectors into one representation and return 
 
 # TODO: Function works with a high amount of data, make sure these are all NumPy operations 
 # TODO: Figure out type hints
-def trim_hatches_to_inside_area(hatches: Any, area: Any) -> Any:
+def trim_layer_to_inside_area(layer: Any, area: Any) -> Any:
     """[summary]
 
     :param hatches: List of hatches to trim to the specified area.
@@ -40,12 +44,12 @@ def trim_hatches_to_inside_area(hatches: Any, area: Any) -> Any:
 
 # TODO: Function works with a high amount of data, make sure these are all NumPy operations 
 # TODO: Figure out type hints
-def trim_hatches_to_outside_area(hatches: Any, area: Any) -> Any:
+def trim_layer_to_outside_areas(layer: Any, area: Any) -> Any:
     """[summary]
 
     :param hatches: List of hatches to trim to OUTSIDE OF the specified area.
     :type hatches: Any
-    :param area: Area to trim the specified hatches to OUTSIDE OF.
+    :param area: Full list of <Hatcher, area specification> pairs to trim the specified hatches to OUTSIDE OF.
     :type area: Any
     :return: The provided list of hatches trimmed to OUTSIDE OF the given area. Returned in the same order.
     :rtype: Any
