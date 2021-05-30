@@ -4,28 +4,33 @@ from typing import Any
 # TODO: Probably cleaner to take a list of 2-tuples in. Not a big deal though.
 # TODO: Figure out actual types here instead of being lazy and doing Any. Just for type hints and doesn't affect runtime, but this is a library and supposed to be readable and maintainable.
 # TODO: Finish documentation 
-def hatch_multiple(default_hatcher: Hatcher, hatcher_area_pairs: tuple[Hatcher, list], geometry: Any) -> None: 
-    """Given an array of pairs of hatchers and associated areas for them to hatch, returns 
+def hatch_multiple(hatchers: list, areas: list, default_hatcher: Hatcher, boundary: Any) -> None: 
+    """Runs hatchers on their associated areas and the default hatcher on anything not in an area, and returns the
+    concatenation of all the hatches. Ordered by the order they are passed-in. 
 
-    :param geometry: 
-    :type geometry: The polygon to hatch, provided as whatever the return value of Part.getVectorSlice() is. 
-        Note that we don't really care what it is, as we simply propagate it to hatch() calls.
-    :param hatchers: List of 2-Long Lists, where the first element of each is an initialized hatcher (i.e. all parameters set) 
-        and the second is a four-long array specifying a [min-x, min-y, max-x, max-y] to trim the resulting hatches to.
-        Note that a default hatcher will be initialized, run, and trimmed such that it includes everything except for the specified areas.
+    :param hatchers: A `list` of Hatcher objects initialized with all their parameters.
     :type hatchers: list
+    :param areas: A `list` of areas, each a `list` in [min-x, min-y, max-x, max-y] form 
+    :type areas: list
+    :param default_hatcher: A Hatcher object initialized with all its parameters that should be used at any point not in an area.
+    :type default_hatcher: Hatcher
+    :param boundary: The layer slice returned by `Part.getVectorSlice(z-coordinate)`; generally an ndarray of float points representing consecutive points
+    :type boundary: Any
     """
 
     # 1. Iterate through Hatchers, getting hatching result then trimming result to associated area 
-    for hatcher_area_pair in hatcher_area_pairs:
-        layer = hatcher_area_pair[0].hatch(geometry)
-        trim_layer_to_inside_area(layer, hatcher_area_pair[1])
+    hatches = []
+    for i in range(len(hatchers)):
+        layer = hatchers[i].hatch(boundary)
+        trimmed_layer = trim_layer_to_inside_area(layer, areas[i])
+        hatches.append(trimmed_layer)
 
     # 2. Run default hatcher and trim out any areas that 
-    default_hatches = default_hatcher.hatch()
-    trim_layer_to_outside_areas(layer, hatcher_area_pairs)
+    default_hatches = default_hatcher.hatch(boundary)
+    trim_layer_to_outside_areas(layer, areas)
 
-    # 3. Concatenate all vectors into one representation and return 
+    # 3. TODO: Concatenate all vectors into one representation and return 
+
 
 # TODO: Function works with a high amount of data, make sure these are all NumPy operations 
 # TODO: Figure out type hints
