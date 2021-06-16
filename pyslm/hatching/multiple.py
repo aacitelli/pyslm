@@ -13,12 +13,12 @@ import numpy.typing as npt
 
 # TODO: Remove
 from typeguard import typechecked
+from math import sqrt
 
 # TODO: Function does a lot of number crunching; convert everything to numpy operations, if they aren't yet. Cleanest way to do this is likely to run a profiler.
 
 # TODO: Probably cleaner to take a list of 2-tuples in. Not a big deal though.
 # TODO: Figure out actual types here instead of being lazy and doing Any. Just for type hints and doesn't affect runtime, but this is a library and supposed to be readable and maintainable.
-
 
 @typechecked  # TODO: Remove
 def hatch_multiple(hatchers: list[Hatcher], areas: npt.ArrayLike, default_hatcher: Hatcher, boundary: npt.ArrayLike, z: float) -> Layer:
@@ -235,6 +235,98 @@ def trim_segment_to_box(segment: LineString, area: np.ndarray) -> Union[LineStri
     # Two distinct intersections => Subsegment
     elif len(intersections) == 2:
         return LineString([intersections[0], intersections[1]])
+
+    else:
+        raise Exception(
+            "Got invalid number of distinct intersections: {}".format(len(intersections)))
+
+@typechecked  # TODO: Remove
+# TODO: Documentation snippet 
+def trim_segment_to_outside_box(segment: LineString, area: np.ndarray) -> Union[tuple[LineString], LineString, None]:
+
+    @typechecked  # TODO: Remove
+    def point_in_bbox(v: Point, bl: Point, tr: Point):
+        return v.x >= bl.x and v.x <= tr.x and v.y >= bl.y and v.y <= tr.y
+    @typechecked  # TODO: Remove
+    def vertices_equal(v1: Point, v2: Point): # Test equality of floating-point based vertices
+        return abs(v1.x - v2.x) <= .00000001 and abs(v1.y - v2.y) <= .00000001
+    @typechecked # TODO: Remove
+    def distance(v1: Point, v2: Point):
+        return sqrt((v2.x - v1.x) ** 2 + (v2.y - v1.y) ** 2)
+
+    # Renaming and putting in formats more readable/usable
+    v1, v2 = Point(segment.xy[0][0], segment.xy[1][0]), Point(segment.xy[0][1], segment.xy[1][1])
+    min_x, min_y, max_x, max_y = area[0], area[1], area[3], area[4]
+    top_left, top_right, bottom_left, bottom_right = Point(min_x, max_y), Point(max_x, max_y), Point(min_x, min_y), Point(max_x, min_y)
+    top_segment, right_segment = LineString([top_left, top_right]), LineString([top_right, bottom_right])
+    bottom_segment, left_segment = LineString([bottom_right, bottom_left]), LineString([bottom_left, top_left])
+
+    # Get intersection points on each side
+    top_intersection = segment.intersection(top_segment)
+    right_intersection = segment.intersection(right_segment)
+    bottom_intersection = segment.intersection(bottom_segment)
+    left_intersection = segment.intersection(left_segment)
+
+    # LineString.intersection(LineString) returns the following general cases (documenting b/c the documentation sucks)
+    # If intersection, returned as a single shapely.geometry.point.Point object
+    # If no intersection or an intersection would only occur if segment(s) were extended, len(intersection.coords) will be zero
+    # If they are colinear, LineString with xy being an array of the points
+
+    # We reverse this relative to trim_segment_to_box() and keep right/bottom
+    if isinstance(right_intersection, LineString) and len(right_intersection.coords) != 0:
+        return LineString([right_intersection.coords[0], right_intersection.coords[1]])
+    if isinstance(bottom_intersection, LineString) and len(bottom_intersection.coords) != 0:
+        return LineString([bottom_intersection.coords[0], bottom_intersection.coords[1]])
+    if isinstance(left_intersection, LineString) and len(left_intersection.coords) != 0 or \
+            isinstance(top_intersection, LineString) and len(top_intersection.coords) != 0:
+        return None
+
+    # Trim sides where there was no intersection (which will be an empty LineString)
+    intersections = [top_intersection, right_intersection,
+                     bottom_intersection, left_intersection]
+    intersections = [x for x in intersections if isinstance(x, Point)]
+
+    # Trim duplicate intersections (only occurs when segment ends at a corner)
+    intersections_without_duplicates = []
+    for intersection in intersections:
+        for unique_intersection in intersections_without_duplicates:
+            if vertices_equal(intersection, unique_intersection):  # Current coordinates already added
+                break
+        intersections_without_duplicates.append(
+            intersection)  # Gets through loop => It's unique
+    intersections = intersections_without_duplicates
+
+    # Zero distinct intersections => Segment is either completely inside or outside, only necessary to test one point
+    # We reverse the returns for this case relative to trim_to_inside_box()
+    if len(intersections) == 0:
+        if v1.x < top_left.x or v1.x > top_right.x or \
+                v1.y < bottom_left.y or v1.y > top_left.y:
+            return LineString([v1, v2])
+        return None
+
+    # One distinct intersection => Subsegment is the intersection point and whichever endpoint is inside (or on) the boundary
+    # We take from the intersection to whichever endpoint is *outside of* boundary, for this function
+    elif len(intersections) == 1:
+        if not point_in_bbox(v1, bottom_left, top_right):
+            return LineString([v1, intersections[0]])
+        elif not point_in_bbox(v2, bottom_left, top_right):
+            return LineString([v2, intersections[0]])
+        return None # Gets here if both points are inside box or on boundary of box; we want to return nothing, as no significant length of the vector is outside the bbox
+
+    # Two distinct intersections => Segment is split into two sections by the box
+    # We pair each intersection with its closest endpoint and return a tuple of the two segments formed by nearest point pairs (we do zero-length checks for cases where it ends on a border)
+    # TODO: Feel like I can write this to feel much more Pythonic
+    elif len(intersections) == 2:
+        output = []
+        if distance(v1, intersections[0]) < distance(v1, intersections[1]):
+            line1, line2 = LineString([v1, intersections[0]]), LineString([v2, intersections[1]])
+        else:
+            line1, line2 = LineString([v2, intersections[0]]), LineString([v1, intersections[1]])
+        if line1.length != 0:
+            output.append(line1)
+        if line2.length != 0:
+            output.append(line2)
+        return tuple(output)
 
     else:
         raise Exception(
