@@ -61,24 +61,25 @@ def hatch_multiple(hatchers: list[Hatcher], areas: npt.ArrayLike, default_hatche
     if not len(trimmed_layers):
         return default_hatcher.hatch(boundary)
 
-    # 2. Concatenate all trimmed vectors into one `Layer` object
+    # 2. Run default hatcher, then trim out any areas that were used for the other ones
+    default_layer = default_hatcher.hatch(boundary)
+    trim_layer_to_outside_areas(default_layer, areas, z)
+
+    # 3. Concatenate all trimmed vectors into one `Layer` object
     end_layer = trimmed_layers[0]
     trimmed_layers = trimmed_layers[1:]
-    for layer in trimmed_layers:
+    for layer in trimmed_layers: # Append all the trimmed ones
         for geometry in layer.geometry:
+            if len(geometry.coords):
+                end_layer.geometry.append(geometry)
+    for geometry in default_layer.geometry: # Append whatever was left over of the default one
+        if len(geometry.coords):
             end_layer.geometry.append(geometry)
-
-    # 3. TODO: Run default hatcher, trim out applicable areas, then add the geometries
-    # At least one custom hatcher was used; TODO: Hatch with default then cut out any applicable areas
-    # default_hatches = default_hatcher.hatch(boundary)
-    # trim_layer_to_outside_areas(layer, areas)
 
     return end_layer
 
 # TODO: Function works with a high amount of data, make sure these are all NumPy operations
 # TODO: Figure out type hints
-
-
 @typechecked  # TODO: Remove
 def trim_layer_to_inside_area(layer: Layer, area: npt.ArrayLike) -> Layer:
     """Trims any HatchGeometry instances on the layer to the provided area 
@@ -117,11 +118,8 @@ def trim_layer_to_inside_area(layer: Layer, area: npt.ArrayLike) -> Layer:
 
     return layer
 
-# TODO: Function works with a high amount of data, make sure these are all NumPy operations
-
-
 @typechecked  # TODO: Remove
-def trim_layer_to_outside_areas(layer: Layer, area: npt.ArrayLike) -> Layer:
+def trim_layer_to_outside_areas(layer: Layer, areas: npt.ArrayLike, z: float) -> Layer:
     """[summary]
 
     :param hatches: List of hatches to trim to OUTSIDE OF the specified area.
@@ -132,21 +130,43 @@ def trim_layer_to_outside_areas(layer: Layer, area: npt.ArrayLike) -> Layer:
     :rtype: Layer
     """
 
-    # Other stuff still isn't working, so this is on the backburner
-    raise NotImplementedError()
-
-    # Trim any HatchGeometry instances on the layer to the provided area
-    # NOTE: If this function is called, we know the given Hatcher was valid for this z-coordinate
-    """
+    # Iterate through geometries, trimming hatches in each based on the provided areas
     for geometry in layer.geometry:
         if isinstance(geometry, ContourGeometry):
             continue
+        
+        # We'll be dynamically sizing arrays a *lot*, so we opt to use normal Python lists instead of numpy operations
+        hatches_before_trim = []
         for i in range(0, len(geometry.coords), 2):
-            segment = LineString([geometry.coords[i], geometry.coords[i + 1]])
-            trimmed_segment = trim_segment_to_box(segment, area)
-            if trimmed_segment != None:
-                geometry.coords[i], geometry.coords[i + 1] = trimmed_segment
-    """
+            v1 = (geometry.coords[i][0], geometry.coords[i][1])
+            v2 = (geometry.coords[i+1][0], geometry.coords[i+1][1])
+            hatches_before_trim.append(LineString([v1, v2]))
+
+        # Iterate through each area, trimming each area from it
+        # It's important for us to apply the result of each area to all areas processed afterward, as we want the output to be only vectors that are not contained in *any* area
+        hatches_after_trim = []
+        for area in areas:
+            if z < area[2] or z > area[5]: # Given area doesn't apply to this z-coordinate, so don't trim based on it
+                continue 
+            for hatch in hatches_before_trim:
+                trimmed = trim_segment_to_outside_box(hatch, area)
+                if isinstance(trimmed, tuple): # tuple => Area split the segment into two LineStrings
+                    hatches_after_trim.append(trimmed[0])
+                    hatches_after_trim.append(trimmed[1])
+                elif isinstance(trimmed, LineString): # LineString => Just one part - the part that was outside of the box
+                    hatches_after_trim.append(trimmed)
+                # None => Entire segment was inside the area; no need to do anything, as this system inherently filters it out
+            hatches_before_trim = hatches_after_trim # Refresh for next trimming cycle/area
+            hatches_after_trim = []
+
+        # Apply trimmed coordinates back to the array (yes, due to the loop order, correct result will be in hatches_before_trim)
+        hatches_np = np.empty(dtype=float, shape=(len(hatches_before_trim) * 2, 2))
+        for i in range(len(hatches_before_trim)): # Convert LineString back to something useful for numpy/pyslm
+            hatches_np[i*2] = [hatches_before_trim[i].xy[0][0], hatches_before_trim[i].xy[1][0]]
+            hatches_np[i*2+1] = [hatches_before_trim[i].xy[0][1], hatches_before_trim[i].xy[1][1]]
+        geometry.coords = np.array(hatches_np)
+
+    return layer
 
 # Largely pulled from a separate implementation I previously did; Python/Shapely makes some stuff more concise, though
 # See https://github.com/aacitelli/OASIS_IslandScanning/blob/fce5e3fb72c71dc22beb887747639b3969390c6b/Source_Code_Ohio_State_CDME/genScan/ScanPath.cpp#L924
@@ -242,7 +262,7 @@ def trim_segment_to_box(segment: LineString, area: np.ndarray) -> Union[LineStri
 
 @typechecked  # TODO: Remove
 # TODO: Documentation snippet 
-def trim_segment_to_outside_box(segment: LineString, area: np.ndarray) -> Union[tuple[LineString], LineString, None]:
+def trim_segment_to_outside_box(segment: LineString, area: np.ndarray) -> Union[tuple, LineString, None]:
 
     @typechecked  # TODO: Remove
     def point_in_bbox(v: Point, bl: Point, tr: Point):
