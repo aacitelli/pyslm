@@ -1,24 +1,25 @@
 # TODO: Organize imports
 
-from numpy import isin
-from pyslm.hatching.hatching import Hatcher
-from pyslm.geometry.geometry import Layer, HatchGeometry, ContourGeometry
+# System imports
 from typing import Any, Union
+from math import sqrt
 
-# Used for line intersection
+# Third party imports
 import shapely
 from shapely.geometry import LineString, Point, point
 import numpy as np
+from numpy import isin
 import numpy.typing as npt
+
+# Local imports
+from pyslm.hatching.hatching import Hatcher
+from pyslm.geometry.geometry import Layer, HatchGeometry, ContourGeometry
 
 # TODO: Remove
 from typeguard import typechecked
-from math import sqrt
 
-# TODO: Function does a lot of number crunching; convert everything to numpy operations, if they aren't yet. Cleanest way to do this is likely to run a profiler.
-
-# TODO: Probably cleaner to take a list of 2-tuples in. Not a big deal though.
-# TODO: Figure out actual types here instead of being lazy and doing Any. Just for type hints and doesn't affect runtime, but this is a library and supposed to be readable and maintainable.
+# TODO: Likely much more optimal to keep all these points and stuff as numpy arrays and just do pure indexing
+# TODO: Make sure all function arguments are actually labeled
 
 @typechecked  # TODO: Remove
 def hatch_multiple(hatchers: list[Hatcher], areas: npt.ArrayLike, default_hatcher: Hatcher, boundary: npt.ArrayLike, z: float) -> Layer:
@@ -78,8 +79,6 @@ def hatch_multiple(hatchers: list[Hatcher], areas: npt.ArrayLike, default_hatche
 
     return end_layer
 
-# TODO: Function works with a high amount of data, make sure these are all NumPy operations
-# TODO: Figure out type hints
 @typechecked  # TODO: Remove
 def trim_layer_to_inside_area(layer: Layer, area: npt.ArrayLike) -> Layer:
     """Trims any HatchGeometry instances on the layer to the provided area 
