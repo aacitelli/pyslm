@@ -3,6 +3,9 @@
 # System imports
 from typing import Any, Union
 from math import sqrt
+from multiprocessing import Pool
+import os 
+import time 
 
 # Third party imports
 import shapely
@@ -20,6 +23,14 @@ from typeguard import typechecked
 
 # TODO: Likely much more optimal to keep all these points and stuff as numpy arrays and just do pure indexing
 # TODO: Make sure all function arguments are actually labeled
+
+# Processes a single hatcher and its associated area
+@typechecked # TODO: Remove
+def process_hatcher(i: int, hatcher: Hatcher, area: np.ndarray, boundary: Union[np.ndarray, list]) -> Layer:
+    layer = hatcher.hatch(boundary)
+    if i != 0: # Only keep contour(s) of first one
+        layer.geometry = [x for x in layer.geometry if isinstance(x, HatchGeometry)]
+    return trim_layer_to_inside_area(layer, area)
 
 @typechecked  # TODO: Remove
 def hatch_multiple(hatchers: list[Hatcher], areas: npt.ArrayLike, default_hatcher: Hatcher, boundary: npt.ArrayLike, z: float) -> Layer:
@@ -39,24 +50,27 @@ def hatch_multiple(hatchers: list[Hatcher], areas: npt.ArrayLike, default_hatche
     """
 
     # 1. Iterate through Hatchers, getting hatching result then trimming result to associated area
+    """ 
+    Multiprocessed way... pretty sure there are IPC conflicts or serializing/deserializing the argument \
+    list has too high overhead, seeing as doing it normally takes 1.7s, compared to 4s for this. \
+    Worth keeping around for the idea, though. Probably faster if it's optimized.
+    args = []
+    applicable_area_indices = [idx for idx, area in enumerate(areas) if z >= area[2] and z <= area[5]]
+    for i, idx in enumerate(applicable_area_indices):
+        args.append([i, hatchers[idx], areas[idx], boundary]) # Using two indices here is confusing, but required for us to ensure the first *filtered* index gets the contour
+    with Pool(os.cpu_count() - 1) as pool:    
+        trimmed_layers = pool.starmap(process_hatcher, args)
+    """
+
+    # Process every hatcher in parallel processes (big speed-up b/c this work is almost entirely cpu-bound); doesn't matter which order they come back inW
     trimmed_layers = []
-    for i in range(len(hatchers)):
-
-        # If this hatcher shouldn't apply to this z-coordinate, skip it
-        min_z, max_z = areas[i][2], areas[i][5]
-        if z > max_z or z < min_z:
-            continue
-
-        # Run hatcher on contour boundary
-        layer = hatchers[i].hatch(boundary)
-
-        # Only keep contour of the first Hatcher (to avoid duplicates)
-        if i != 0:
+    applicable_area_indices = [idx for idx, area in enumerate(areas) if z >= area[2] and z <= area[5]]
+    for i, idx in enumerate(applicable_area_indices):
+        layer = hatchers[idx].hatch(boundary)
+        if i != 0: # Only keep contour of the first Hatcher (to avoid duplicates)
             layer.geometry = [
                 x for x in layer.geometry if isinstance(x, HatchGeometry)]
-
-        # Trims any instances of HatchGeometry to the given area
-        trimmed_layers.append(trim_layer_to_inside_area(layer, areas[i]))
+        trimmed_layers.append(trim_layer_to_inside_area(layer, areas[i])) # Trim to given area
 
     # Edge Case: None of the areas applied at this height, so we should hatch with the default and return it
     if not len(trimmed_layers):
