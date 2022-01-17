@@ -1,4 +1,7 @@
+import logging
+
 from typing import Any, List, Tuple, Optional
+from collections.abc import Iterable
 
 import matplotlib.pyplot as plt
 import matplotlib.colors
@@ -6,18 +9,39 @@ import matplotlib.collections as mc
 
 import numpy as np
 
+from shapely.geometry import Polygon, MultiPolygon
+
 from .core import Part
-from .geometry import Layer
+from .geometry import Layer, HatchGeometry, ContourGeometry
 
 
-def plotPolygon(polygons, zPos=0.0,
+def getContoursFromShapelyPolygon(poly, mergeRings:bool = True) -> Tuple[np.ndarray, np.ndarray]:
+
+    outerRings = []
+    innerRings = []
+
+    outerRings += [np.array(tuple(poly.exterior.coords))]
+
+    for ring in poly.interiors:
+        innerRings += [np.array(tuple(ring.coords))]
+
+    if mergeRings:
+        return outerRings + innerRings
+    else:
+        return outerRings, innerRings
+
+
+def plotPolygon(polygons: List[Any], zPos=0.0,
                 lineColor: Optional[Any] = 'k', lineWidth: Optional[float] = 0.7, fillColor: Optional[Any] = 'r',
                 plot3D: Optional[bool] = False, plotFilled: Optional[bool] = False,
                 handle: Tuple[plt.Figure, plt.Axes] = None) -> Tuple[plt.Figure, plt.Axes]:
     """
     Helper method for plotting polygons (numpy coordinates) and those composed of Python lists.
 
-    :param polygons:  A list of polygons
+    :note:
+        Method cannot deal with complex polygon i.e. those with interiors due to limitation with Matplotlib
+
+    :param polygons: A list of polygons
     :param zPos: The z position of the polygons if plot3D is enabled
     :param lineColor: Line color used for matplotlib (optional)
     :param lineWidth: Line width used for matplotlib (optional)
@@ -41,31 +65,47 @@ def plotPolygon(polygons, zPos=0.0,
         else:
             fig, ax = plt.subplots()
 
-    ax.axis('equal')
+    #ax.axis('equal')
     plotNormalize = matplotlib.colors.Normalize()
 
     patchList = []
 
-    for contour in polygons:
+    contourCoords = []
+
+    if not isinstance(polygons, Iterable):
+        polygons = [polygons]
+
+    for poly in polygons:
+        if isinstance(poly, Polygon):
+            contourCoords += getContoursFromShapelyPolygon(poly)
+        elif isinstance(poly, MultiPolygon):
+            contourCoords += [getContoursFromShapelyPolygon(p) for p in list(poly)]
+        else:
+            contourCoords.append(poly)
+
+    for contour in contourCoords:
+
         if plot3D:
             ax.plot(contour[:, 0], contour[:, 1], zs=zPos, color=lineColor, linewidth=lineWidth)
         else:
             if plotFilled:
                 polygon = matplotlib.patches.Polygon(contour, fill=True, linewidth=lineWidth, edgecolor=lineColor, color=fillColor, facecolor=fillColor)
-                ax.add_patch(polygon)
+                #ax.add_patch(polygon)
                 patchList.append(polygon)
 
             else:
                 ax.plot(contour[:, 0], contour[:, 1], color=lineColor, linewidth=lineWidth)
 
-    #p = mc.PatchCollection(patchList, alpha=1)
-    #ax.add_collection(p)
+    if plotFilled:
+        p = mc.PatchCollection(patchList, alpha=1)
+        ax.add_collection(p)
 
     return fig, ax
 
 
 def plotLayers(layers: List[Layer],
-               plotContours: Optional[bool] = True, plotHatches: Optional[bool] = True, plotPoints: Optional[bool] = True,
+               plotContours: Optional[bool] = True, plotHatches: Optional[bool] = True,
+               plotPoints: Optional[bool] = True,
                handle=None) -> Tuple[plt.Figure, plt.Axes]:
     """
     Plots a list of :class:`Layer`, specifically the scan vectors (contours and hatches) and point exposures for each
@@ -75,7 +115,6 @@ def plotLayers(layers: List[Layer],
     :param plotContours: Plots the inner hatch scan vectors. Defaults to `True`
     :param plotHatches: Plots the hatch scan vectors
     :param plotPoints: Plots point exposures
-    :param plotOrderLine: Plots an additional line showing the order of vector scanning
     :param handle: Matplotlib handle to re-use
     """
     if handle:
@@ -88,12 +127,101 @@ def plotLayers(layers: List[Layer],
     for layer in layers:
         fig, ax = plot(layer, layer.z/1000,
                        plot3D=True, plotContours=plotContours, plotHatches=plotHatches, plotPoints=plotPoints,
-                       handle=(fig,ax))
+                       handle=(fig, ax))
+
+    return fig, ax
+
+
+def plotSequential(layer: Layer, plotArrows: Optional[bool] = False, plotOrderLine: Optional[bool] = False,
+                   plotJumps: Optional[bool] = False,
+                   handle=None) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Plots sequentially the all the scan vectors (contours and hatches) for all Layer Geometry in a Layer
+    using `Matplotlib`. The :class:`Layer` may be only plotted across a single 2D layer.
+
+    :param layer: A single :class:`Layer` containing a set of various  :class:`LayerGeometry` objects
+    :param plotArrows: Plot the direction of each scan vector. This reduces the plotting performance due to use of
+                       matplotlib annotations, should be disabled for large datasets
+    :param plotOrderLine: Plots an additional line showing the order of vector scanning
+    :param plotJumps:  Plots the jumps (in dashed lines) between vectors
+    :param handle: Matplotlib handle to re-use
+    """
+
+    if handle:
+        fig = handle[0]
+        ax = handle[1]
+
+    else:
+        fig, ax = plt.subplots()
+        ax.axis('equal')
+
+    plotNormalize = matplotlib.colors.Normalize()
+
+    scanVectors = []
+    for geom in layer.geometry:
+
+        if isinstance(geom, HatchGeometry):
+            coords = geom.coords.reshape(-1, 2, 2)
+        elif isinstance(geom, ContourGeometry):
+            coords = np.hstack([geom.coords, np.roll(geom.coords, -1, axis=0)]).reshape(-1,2,2)
+
+        scanVectors.append(coords)
+
+    if len(scanVectors) == 0:
+        logging.warning('pyslm.visualise.plotSequential: Empty layer')
+        return
+
+    scanVectors = np.vstack(scanVectors)
+
+    lc = mc.LineCollection(scanVectors, cmap=plt.cm.rainbow, linewidths=1.0)
+
+    if plotOrderLine:
+        midPoints = np.mean(scanVectors, axis=1)
+        idx6 = np.arange(len(scanVectors))
+        ax.plot(midPoints[idx6][:, 0], midPoints[idx6][:, 1])
+
+    """
+    Plot the sequential index of the hatch vector and generating the colourmap by using the cumulative distance
+    across all the scan vectors in order to normalise the length based effectively on the distance
+    """
+    delta = scanVectors[:, 1, :] - scanVectors[:, 0, :]
+    dist = np.sqrt(delta[:, 0] * delta[:, 0] + delta[:, 1] * delta[:, 1])
+    cumDist = np.cumsum(dist)
+    #lc.set_array(np.arange(len(scanVectors)))
+    lc.set_array(cumDist)
+
+    # Add all the line collections to the figure
+    ax.add_collection(lc)
+
+    if plotJumps:
+        # Plot the jumping vectors by rolling the entire stack of scan vectors
+        svTmp = scanVectors.copy().reshape(-1, 2)
+        svTmp = np.roll(svTmp, -1, axis=0)[0:-2]
+        svTmp = svTmp.reshape(-1, 2, 2)
+
+        # scanVectors = np.vstack([scanVectors, svTmp])
+
+        jumpLC = mc.LineCollection(svTmp, cmap=plt.cm.get_cmap('Greys'), linewidths=0.3, linestyles="--", lw=0.7)
+
+        ax.add_collection(jumpLC)
+
+    ax.plot()
+
+    if plotArrows:
+        for hatch in scanVectors:
+            midPoint = np.mean(hatch, axis=0)
+            delta = hatch[1, :] - hatch[0, :]
+
+            plt.annotate('', xytext=midPoint - delta * 1e-4,
+                         xy=midPoint,
+                         arrowprops={'arrowstyle': "->", 'facecolor': 'black'})
+
+    return fig, ax
 
 def plot(layer: Layer, zPos:Optional[float] = 0,
          plotContours: Optional[bool] = True, plotHatches: Optional[bool] = True, plotPoints: Optional[bool] = True,
          plot3D: Optional[bool] = True, plotArrows: Optional[bool] = False, plotOrderLine: Optional[bool] = False,
-         plotJumps: Optional[bool] = False,
+         plotColorbar: Optional[bool] = False,
          index: Optional[str] = '',
          handle=None) -> Tuple[plt.Figure, plt.Axes]:
     """
@@ -109,7 +237,7 @@ def plot(layer: Layer, zPos:Optional[float] = 0,
     :param plotArrows: Plot the direction of each scan vector. This reduces the plotting performance due to use of
                        matplotlib annotations, should be disabled for large datasets
     :param plotOrderLine: Plots an additional line showing the order of vector scanning
-    :param plotJumps: Plots the jump vectors of the layer in gray (rgb (128, 128, 128)).
+    :param plotColorbar: Plots a colorbar for the hatch section
     :param index: A string defining the property to plot the scan vector geometry colours against
     :param handle: Matplotlib handle to re-use
     """
@@ -120,9 +248,9 @@ def plot(layer: Layer, zPos:Optional[float] = 0,
 
     else:
         if plot3D:
-            from mpl_toolkits.mplot3d import Axes3D
             fig = plt.figure()
-            ax = plt.axes(projection='3d', aspect='equal')
+            ax = plt.axes(projection='3d')
+
         else:
             fig, ax = plt.subplots()
             ax.axis('equal')
@@ -170,26 +298,18 @@ def plot(layer: Layer, zPos:Optional[float] = 0,
 
             if plot3D:
                 ax.add_collection3d(lc, zs=zPos)
+            else:
+                ax.add_collection(lc)
+                ax.plot()
 
             if not plot3D and plotOrderLine:
-                ax.add_collection(lc)
+
                 midPoints = np.mean(hatches, axis=1)
                 idx6 = np.arange(len(hatches))
                 ax.plot(midPoints[idx6][:, 0], midPoints[idx6][:, 1])
 
-            # Jump vectors
-            if plotJumps:
-                jumps = np.empty((len(hatches) - 1, 2, 2))
-                for i in range(len(hatches) - 1):
-                    currentHatch = hatches[i]
-                    nextHatch = hatches[i + 1]
-                    jumps[i] = np.array([currentHatch[1], nextHatch[0]])                
-                colors = np.array([.5, .5, .5, 1] * len(jumps)).reshape(-1, 4) # likely more optimal to use np.full(), but was unable to get it working with arrays
-                jumps_lc = mc.LineCollection(jumps, colors=colors, linewidths=.55)
-                ax.add_collection(jumps_lc)
-
-            ax.add_collection(lc)
-            #axcb = fig.colorbar(lc)
+            if plotColorbar:
+                axcb = fig.colorbar(lc)
 
     if plotContours:
 
@@ -248,6 +368,10 @@ def plot(layer: Layer, zPos:Optional[float] = 0,
             #for pointsGeom in layer.getPointsGeometry():
             #   ax.scatter(pointsGeom.coords[:, 0], pointsGeom.coords[:, 1], 'x')
 
+    if False:
+        world_limits = ax.get_w_lims()
+        ax.set_box_aspect((world_limits[1] - world_limits[0], world_limits[3] - world_limits[2],
+                           world_limits[5] - world_limits[4]))
     return fig, ax
 
 

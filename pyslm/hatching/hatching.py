@@ -1,6 +1,7 @@
 import abc
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
+import logging
 
 import numpy as np
 
@@ -14,9 +15,9 @@ from ..geometry import Layer, Model, LayerGeometry, ContourGeometry, HatchGeomet
 def getExposurePoints(layer: Layer, models: List[Model], includePowerDeposited: bool = True):
     """
     A utility method to return a list of exposure points given a :class:`~pyslm.geometry.Layer` with an associated
-    :class:`~pyslm.geometry.Model` which contains the :class:`~pyslm.geometry.BuildStyle` that provides the point exposure distance
-    or an effective laser speed to spatially discretise the scan vectors into a series of points. If the optional
-    parameter `includePowerDeposited` is set to True, the laser power deposited in included.
+    :class:`Model` which contains the :class:`BuildStyle` that provides the point
+    exposure distance or an effective laser speed to spatially discretise the scan vectors into a series of points.
+    If the optional parameter `includePowerDeposited` is set to True, the laser power deposited in included.
 
     .. note::
         The :attr:`BuildStyle.pointDistance` parameter must be set or this method will fail.
@@ -160,12 +161,16 @@ class BaseHatcher(abc.ABC):
     """
 
 
-    PYCLIPPER_SCALEFACTOR = 1e4
+    PYCLIPPER_SCALEFACTOR = 1e5
     """ 
     The scaling factor used for polygon clipping and offsetting in `PyClipper <https://pypi.org/project/pyclipper/>`_ 
     for the decimal component of each polygon coordinate. This should be set to inverse of the required decimal 
     tolerance i.e. 0.01 requires a minimum scale factor of 100. This scaling factor is used 
     in :meth:`~BaseHatcher.scaleToClipper` and :meth:`~BaseHatcher.scaleFromClipper`. 
+    
+    :note:
+        From experience, 1e4, mostly works, however, there are some artefacts generated during clipping hatch vectors.
+        Therefore at a small peformance cost 1e5 is recommended.
     """
 
     def __init__(self):
@@ -280,6 +285,7 @@ class BaseHatcher(abc.ABC):
         for polyChild in boundaryOffsetPolys.Childs:
             offsetContours += BaseHatcher._getChildPaths(polyChild)
 
+
         return offsetContours
 
     @staticmethod
@@ -367,11 +373,9 @@ class BaseHatcher(abc.ABC):
 
 
         edges = []
-        #print(lines)
-
 
         lineList =  lines.reshape([-1, 2, 3])
-        # print(lineList.shape)
+
         i = 0
 
         results = []
@@ -380,7 +384,6 @@ class BaseHatcher(abc.ABC):
         for i in np.arange(0,lineList.shape[0]):
             #i += 1
             point = lineList[i]
-            # print(point)
 
             edge = Contour([Point(point[0,0], point[0,1]),
                             Point(point[1,0], point[1,1])], [], True)
@@ -400,8 +403,6 @@ class BaseHatcher(abc.ABC):
 
             plt.plot(points[:,0], points[:,1])
 
-        # print(result)
-        # print('completed result')
         return results
 
 
@@ -420,6 +421,9 @@ class BaseHatcher(abc.ABC):
         """
         #clipLines = BaseHatcher.clipLines2(paths, lines)
 
+        if len(lines) == 0:
+            # Input from generateHatching is empty so return empty
+            return None
 
         pc = pyclipper.Pyclipper()
 
@@ -431,8 +435,6 @@ class BaseHatcher(abc.ABC):
         lineList = lines.reshape(-1, 2, 3)
         lineList = tuple(map(tuple, lineList))
         lineList = BaseHatcher.scaleToClipper(lineList)
-
-        # print('len of lines', len(lineList))
 
         pc.AddPaths(lineList, pyclipper.PT_SUBJECT, False)
 
@@ -460,8 +462,6 @@ class BaseHatcher(abc.ABC):
         """
 
         pc = pyclipper.Pyclipper()
-
-        # 'len paths', len(contourPaths))
 
         for path in paths:
             for boundary in path:
@@ -496,13 +496,15 @@ class BaseHatcher(abc.ABC):
         :return: Returns the list of un-clipped scan vectors
         """
 
-        # Hatch angle
-        theta_h = np.radians(hatchAngle)  # 'rad'
+        """
+        The hatch angle
+        Note the angle is reversed here because the rotation matrix is counter-clockwise
+        """
+        theta_h = np.radians(hatchAngle)# * -1.0)  # 'rad'
 
         # Get the bounding box of the paths
         bbox = self.boundaryBoundingBox(paths)
 
-        # print('bounding box bbox', bbox)
         # Expand the bounding box
         bboxCentre = np.mean(bbox.reshape(2, 2), axis=0)
 
@@ -533,7 +535,7 @@ class BaseHatcher(abc.ABC):
         return coords
 
     @abc.abstractmethod
-    def hatch(self, boundaryFeature) -> Layer:
+    def hatch(self, boundaryFeature) -> Union[Layer, None]:
         """
         The hatch method should be re-implemented by a child class to generate a :class:`Layer` containing the scan
         vectors used for manufacturing the layer.
@@ -711,21 +713,24 @@ class Hatcher(BaseHatcher):
         super().__init__()
 
         # Contour private attributes
+        self._scanContourFirst = False
         self._numInnerContours = 1
         self._numOuterContours = 1
         self._spotCompensation = 0.08  # mm
         self._contourOffset = 1.0 * self._spotCompensation
         self._volOffsetHatch = self._spotCompensation
 
+
         # Hatch private attributes
         self._layerAngleIncrement = 0  # 66 + 2 / 3
         self._hatchDistance = 0.08  # mm
         self._hatchAngle = 45
         self._hatchSortMethod = None
+        self._hatchingEnabled = True
 
     @property
     def hatchDistance(self) -> float:
-        """ The distance between adjacent hatch scan vectors. """
+        """ The distance between adjacent hatch scan vectors """
         return self._hatchDistance
 
     @hatchDistance.setter
@@ -734,7 +739,9 @@ class Hatcher(BaseHatcher):
 
     @property
     def hatchAngle(self) -> float:
-        """ The base hatch angle used for hatching the region expressed in degrees :math:`[-180,180]`"""
+        """
+        The base hatch angle used for hatching the region expressed in degrees :math:`[-180,180]`
+        """
         return self._hatchAngle
 
     @hatchAngle.setter
@@ -759,11 +766,26 @@ class Hatcher(BaseHatcher):
         return self._hatchSortMethod
 
     @hatchSortMethod.setter
-    def hatchSortMethod(self, sortObj):
-        if not isinstance(sortObj, BaseSort):
+    def hatchSortMethod(self, sortObj: Any):
+
+        if sortObj is None:
+            pass
+        elif not isinstance(sortObj, BaseSort):
             raise TypeError("The Hatch Sort Method should be derived from the BaseSort class")
 
         self._hatchSortMethod = sortObj
+
+    @property
+    def scanContourFirst(self) -> bool:
+        """
+        Determines if the contour/border vectors :class:`LayerGeometry` are scanned first before the hatch vectors. By
+        default this is set to `False`.
+        """
+        return self._scanContourFirst
+
+    @scanContourFirst.setter
+    def scanContourFirst(self, value: bool):
+        self._scanContourFirst = value
 
     @property
     def numInnerContours(self) -> int:
@@ -800,9 +822,21 @@ class Hatcher(BaseHatcher):
         self._spotCompensation = value
 
     @property
+    def contourOffset(self) -> float:
+        """
+        The contour offset is the distance between the contour or border scans
+        """
+        return self._contourOffset
+
+    @contourOffset.setter
+    def contourOffset(self, offset: float):
+        self._contourOffset = offset
+
+    @property
     def volumeOffsetHatch(self) -> float:
         """
-        An additional offset may be added (positive or negative) between the contour and the internal hatching.
+        An additional offset may be added (positive or negative) between the contour/border scans and the
+        internal hatching for the bulk volume.
         """
         return self._volOffsetHatch
 
@@ -810,7 +844,16 @@ class Hatcher(BaseHatcher):
     def volumeOffsetHatch(self, value: float):
         self._volOffsetHatch = value
 
-    def hatch(self, boundaryFeature):
+    @property
+    def hatchingEnabled(self) -> bool:
+        """ If the internal hatch region should be processed (default: True)"""
+        return self._hatchingEnabled
+
+    @hatchingEnabled.setter
+    def hatchingEnabled(self, value):
+        self._hatchingEnabled = value
+
+    def hatch(self, boundaryFeature) -> Union[Layer, None]:
         """
         Generates a series of contour or boundary offsets along with a basic full region internal hatch.
 
@@ -818,13 +861,17 @@ class Hatcher(BaseHatcher):
         :return: A :class:`Layer` object containing a list of :class:`LayerGeometry` objects generated
         """
         if len(boundaryFeature) == 0:
-            return
+            return None
 
         layer = Layer(0, 0)
         # First generate a boundary with the spot compensation applied
 
-        offsetDelta = 0.0
+        offsetDelta = 1e-6
         offsetDelta -= self._spotCompensation
+
+        # Store all contour layer geometries to before adding at the end of each layer
+        contourLayerGeometries = []
+        hatchLayerGeometries = []
 
         for i in range(self._numOuterContours):
             offsetDelta -= self._contourOffset
@@ -835,11 +882,10 @@ class Hatcher(BaseHatcher):
                     contourGeometry = ContourGeometry()
                     contourGeometry.coords = np.array(path)[:, :2]
                     contourGeometry.subType = "outer"
-                    layer.geometry.append(contourGeometry)  # Append to the layer
+                    contourLayerGeometries.append(contourGeometry)  # Append to the layer
 
         # Repeat for inner contours
         for i in range(self._numInnerContours):
-
             offsetDelta -= self._contourOffset
             offsetBoundary = self.offsetBoundary(boundaryFeature, offsetDelta)
 
@@ -848,22 +894,24 @@ class Hatcher(BaseHatcher):
                     contourGeometry = ContourGeometry()
                     contourGeometry.coords = np.array(path)[:, :2]
                     contourGeometry.subType = "inner"
-                    layer.geometry.append(contourGeometry)  # Append to the layer
+                    contourLayerGeometries.append(contourGeometry)  # Append to the layer
 
-        # The final offset is applied to the boundary
-
-        offsetDelta -= self._volOffsetHatch
+        # The final offset is applied to the boundary if there has been existing contour offsets applied
+        if self._numInnerContours + self._numOuterContours > 0:
+            offsetDelta -= self._volOffsetHatch
 
         curBoundary = self.offsetBoundary(boundaryFeature, offsetDelta)
 
         scanVectors = []
 
-        if True:
+        if self.hatchingEnabled and len(curBoundary) > 0:
             paths = curBoundary
 
             # Hatch angle will change per layer
             # TODO change the layer angle increment
             layerHatchAngle = np.mod(self._hatchAngle + self._layerAngleIncrement, 180)
+            #layerHatchAngle = float(self._hatchAngle + self._layerAngleIncrement)
+            #layerHatchAngle -= np.floor(layerHatchAngle / 360. + 0.5) * 360.
 
             # The layer hatch angle needs to be bound by +ve X vector (i.e. -90 < theta_h < 90 )
             if layerHatchAngle > 90:
@@ -874,6 +922,7 @@ class Hatcher(BaseHatcher):
 
             # Clip the hatch fill to the boundary
             clippedPaths = self.clipLines(paths, hatches)
+            clippedLines = []
 
             # Merge the lines together
             if len(clippedPaths) > 0:
@@ -886,7 +935,23 @@ class Hatcher(BaseHatcher):
                 clippedLines = clippedLines[id, :, :]
 
                 scanVectors.append(clippedLines)
-        else:
+
+                # Scan vectors have been created for the hatched region
+
+                # Construct a HatchGeometry containing the list of points
+                hatchGeom = HatchGeometry()
+
+                # Only copy the (x,y) points from the coordinate array.
+                hatchVectors = np.vstack(scanVectors)
+                hatchVectors = hatchVectors[:, :, :2].reshape(-1, 2)
+
+                # Note the does not require positional sorting
+                if self.hatchSortMethod:
+                    hatchVectors = self.hatchSortMethod.sort(hatchVectors)
+
+                hatchGeom.coords = hatchVectors
+                hatchLayerGeometries.append(hatchGeom)
+        if False:
             # Iterate through each closed polygon region in the slice. The currently individually sliced.
             for contour in curBoundary:
                 # print('{:=^60} \n'.format(' Generating hatches '))
@@ -921,24 +986,13 @@ class Hatcher(BaseHatcher):
                 scanVectors.append(clippedLines)
 
 
-        if len(clippedLines) > 0:
-            # Scan vectors have been created for the hatched region
 
-            # Construct a HatchGeometry containing the list of points
-            hatchGeom = HatchGeometry()
+        if self._scanContourFirst:
+            layer.geometry.extend(contourLayerGeometries + hatchLayerGeometries)
+        else:
+            layer.geometry.extend(hatchLayerGeometries + contourLayerGeometries)
 
-            # Only copy the (x,y) points from the coordinate array.
-            hatchVectors = np.vstack(scanVectors)
-            hatchVectors  = hatchVectors[:, :, :2].reshape(-1, 2)
-
-            # Note the does not require positional sorting
-            if self.hatchSortMethod:
-                hatchVectors = self.hatchSortMethod.sort(hatchVectors)
-
-            hatchGeom.coords = hatchVectors
-
-            layer.geometry.append(hatchGeom)
-
+        # Append the contours hatch vecotrs
         return layer
 
 
@@ -966,7 +1020,7 @@ class StripeHatcher(Hatcher):
         return self._stripeWidth
 
     @stripeWidth.setter
-    def stripeWidth(self, width):
+    def stripeWidth(self, width: float):
         self._stripeWidth = width
 
     @property
@@ -980,7 +1034,9 @@ class StripeHatcher(Hatcher):
 
     @property
     def stripeOffset(self) -> float:
-        """ The stripe offset is the relative distance (hatch spacing) to move the scan vectors between adjacent stripes"""
+        """
+        The stripe offset is the relative distance (hatch spacing) to move the scan vectors between adjacent stripes
+        """
         return self._stripeOffset
 
     @stripeOffset.setter
@@ -997,15 +1053,17 @@ class StripeHatcher(Hatcher):
         :param hatchAngle: Hatch angle (degrees) to rotate the scan vectors
 
         :return: Returns the list of unclipped scan vectors
+        """
 
         """
-        # Hatch angle
-        theta_h = np.radians(hatchAngle)  # 'rad'
+        The hatch angle
+        Note the angle is reversed here because the rotation matrix is counter-clockwise
+        """
+        theta_h = np.radians(hatchAngle * -1.0)  # 'rad'
 
         # Get the bounding box of the paths
         bbox = self.boundaryBoundingBox(paths)
 
-        # print('bounding box bbox', bbox)
         # Expand the bounding box
         bboxCentre = np.mean(bbox.reshape(2, 2), axis=0)
 
@@ -1125,7 +1183,6 @@ class BasicIslandHatcher(Hatcher):
         # Get the bounding box of the paths
         bbox = self.boundaryBoundingBox(paths)
 
-        # print('bounding box bbox', bbox)
         # Expand the bounding box
         bboxCentre = np.mean(bbox.reshape(2, 2), axis=0)
 

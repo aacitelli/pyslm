@@ -1,11 +1,16 @@
+from abc import ABC
+from typing import Any, List, Optional, Tuple
+import logging
+
 import numpy as np
 import networkx as nx
 import trimesh
 
-from abc import ABC
-from typing import Any, List, Optional, Tuple
 
 from shapely.geometry import Polygon
+from shapely.ops import unary_union
+
+from scipy.spatial.qhull import ConvexHull
 
 
 class DocumentObject(ABC):
@@ -41,11 +46,14 @@ class DocumentObject(ABC):
     def boundingBox(self):  # const
         raise NotImplementedError('Abstract  method should be implemented in derived class')
 
+    def extents(self):
+        raise NotImplementedError('Abstract  method should be implemented in derived class')
 
 class Document:
 
     def __init__(self):
         # print('Initialising the Document Graph')
+        logging.info('Initialising the Document Graph')
 
         # Create a direct acyclic graph using NetworkX
         self._graph = nx.DiGraph()
@@ -157,8 +165,8 @@ class Part(DocumentObject):
     The part can be transformed and has a position (:attr:`~Part.origin`),
     rotation (:attr:`~Part.rotation`) and additional scale factor (:attr:`~Part.scaleFactor`), which are collectively
     applied to the geometry in its local coordinate system :math:`(x,y,z)`. Changing the geometry using
-    :meth:`~Part.setGeometryByMesh` or :meth:`~Part.setGeometry` along with any of the transformation attributes will set
-    the part dirty and forcing the transformation and geometry to be re-computed on the next call in order to obtain
+    :meth:`~Part.setGeometryByMesh` or :meth:`~Part.setGeometry` along with any of the transformation attributes will
+    set the part dirty and forcing the transformation and geometry to be re-computed on the next call in order to obtain
     the :attr:`Part.geometry`.
 
     The part is currently based off a faceted mesh, internally building on capabilities of the Trimesh packages.
@@ -172,6 +180,12 @@ class Part(DocumentObject):
 
     _partType = 'Part'
     """ The part type is a static class attribute used for classifying the part when used in the document tree. """
+
+    POLYGON_FIX_EPSILON = 1e-3
+    """ 
+    Constant value used for repairing invalid/broken polygon regions obtained using :meth:`getVectorSlice`
+    Default value is equivalent to 1 micron.
+    """
 
     def __init__(self, name):
 
@@ -267,7 +281,7 @@ class Part(DocumentObject):
         (:attr:`~Part.origin`), a :attr:`~Part.rotation` and a :attr:`~Part.scaleFactor`
         """
 
-        Sx = trimesh.transformations.scale_matrix(factor = self._scaleFactor[0], direction=[1,0,0])
+        Sx = trimesh.transformations.scale_matrix(factor=self._scaleFactor[0], direction=[1,0,0])
         Sy = trimesh.transformations.scale_matrix(factor=self._scaleFactor[1] , direction=[0,1,0])
         Sz = trimesh.transformations.scale_matrix(factor=self._scaleFactor[2], direction=[0,0,1])
         S = Sx*Sy*Sz
@@ -281,20 +295,41 @@ class Part(DocumentObject):
 
         return M
 
-    def setGeometry(self, filename: str) -> None:
+    def setGeometry(self, geometry,
+                    fixGeometry: Optional[bool] = True,
+                    mergeVertices: Optional[bool] = True) -> None:
         """
         Sets the Part geometry based on a mesh filename. The mesh must have a compatible file that can be
-        imported via `trimesh`.
+        imported via `trimesh` - see .
 
         :param filename: The mesh filename
+        :param fixGeometry: Use Trimesh's utilities to fix the mesh: Default = `True`
+        :param mergeVertices:  Merges the vertices of the mesh: Default = `True`
         """
-        self._geometry = trimesh.load_mesh(filename, use_embree=False, process=True, Validate_faces=False)
 
-        # print('Geometry information <{:s}> - [{:s}]'.format(self.name, filename))
-        # print('\t bounds', self._geometry.bounds)
-        # print('\t extent', self._geometry.extents)
+        if isinstance(geometry, trimesh.Trimesh):
+            self._geometry = geometry
+        else:
+            logging.info('Geometry information <{:s}> - [{:s}]'.format(self.name, geometry))
+            self._geometry = trimesh.load_mesh(geometry, process=False, use_embree=False, Validate_faces=False)
 
+        if mergeVertices:
+            self._geometry.merge_vertices()
+
+        if fixGeometry:
+            self._geometry.process(validate=True)
+            self._geometry.fix_normals()
+
+        logging.info('\t Bounds: [{:.3f},{:.3f},{:.3f}], [{:.3f},{:.3f},{:.3f}]'.format(*self._geometry.bounds.ravel()))
+        logging.info('\t Extent: [{:.3f},{:.3f},{:.3f}]'.format(*self._geometry.extents))
+
+        self.checkGeometry()
         self._dirty = True
+
+    def checkGeometry(self) -> bool:
+
+        if not self.geometry.is_watertight:
+            logging.warning('The geometry for {:s} is not watertight'.format(self.name))
 
     def setGeometryByMesh(self, mesh: trimesh.Trimesh) -> None:
         """
@@ -305,32 +340,44 @@ class Part(DocumentObject):
         self._geometry = mesh
         self._dirty = True
 
-    @property
-    def volume(self) -> float:
-        if not self.geometry.is_volume:
-            raise ValueError('Part is not a valid volume')
-
-        return self.geometry.volume
-
-    @property
-    def area(self) -> float:  # const
-        return self.geometry.area
-
-    @property
-    def geometry(self) -> trimesh.Trimesh:
+    def getProjectedHull(self, returnPoly: bool = False):
         """
-        The geometry of the part with all transformations applied.
+        The convex hull of the part projected in the Z-direction. This is for convenience when trying to find the
+        approximate boundary of the part when used for optimising the layout of parts.
+
+        :return: The convex hull of the part
         """
-        if not self._geometry:
-            return None
 
-        if self.isDirty():
-            # print('Updating {:s} Geometry Representation'.format(self.label))
-            self._geometryCache = self._geometry.copy()
-            self._geometryCache.apply_transform(self.getTransform())
-            self._dirty = False
+        coords = self.geometry.vertices[:,:2]
 
-        return self._geometryCache
+        chull = ConvexHull(coords)
+
+        hullCoords = coords[chull.vertices]
+
+        if returnPoly:
+            hullCoords = np.append(hullCoords, hullCoords[0,:].reshape(-1,2), axis=0)
+            return Polygon(hullCoords)
+        else:
+            return hullCoords
+
+    def getProjectedArea(self) :
+        """
+        The resultant projected area of the part projected on the z-axis.
+
+        :return: A Shapely Polygon representing the projected area of the part
+        """
+
+        facesCpy = self.geometry.faces
+
+        shapes = self.geometry.vertices[facesCpy, :2]
+
+        triPolys = []
+
+        for face in shapes:
+            faceCpy= np.append(face, face[0,:].reshape(-1,2), axis=0)
+            triPolys.append(Polygon(faceCpy))
+
+        return unary_union(triPolys)
 
     @property
     def boundingBox(self) -> np.ndarray:  # const
@@ -346,11 +393,59 @@ class Part(DocumentObject):
             return  self.geometry.bounds.flatten()
 
     @property
+    def extents(self) -> np.ndarray:  # const
+        """
+        The extents the geometry transformed in the global coordinate frame :math:`(X,Y,Z)`. The extents is a 1x3 array
+        consisting of the linear dimensions of the part.
+        """
+
+        if not self.geometry:
+            raise ValueError('Geometry was not set')
+
+        bbox = self.boundingBox
+
+        return np.array([bbox[3] - bbox[0],
+                         bbox[4] - bbox[1],
+                         bbox[5] - bbox[2]])
+
+    @property
+    def volume(self) -> float:
+        if not self.geometry.is_volume:
+            raise ValueError('Part is not a valid volume')
+
+        return self.geometry.volume
+
+    @property
+    def surfaceArea(self) -> float:  # const
+        """ Surface area of the part geometry"""
+        return self.geometry.area
+
+    @property
+    def geometry(self) -> trimesh.Trimesh:
+        """
+        The geometry of the part with all transformations applied.
+        """
+        if not self._geometry:
+            return None
+
+        if self.isDirty():
+            self.regenerate()
+
+        return self._geometryCache
+
+    def regenerate(self):
+        """
+        Regenerate the geometry
+        """
+        logging.debug('Updating {:s} Geometry Representation'.format(self.label))
+        self._geometryCache = self._geometry.copy()
+        self._geometryCache.apply_transform(self.getTransform())
+        self._dirty = False
+
+    @property
     def partType(self) -> str:
         """
-        Returns the Part type. This will be used in future for the document tree.
-
-        :return: The part type
+        The Part type. This will be used in future for the document tree.
         """
 
         return self._partType
@@ -392,14 +487,18 @@ class Part(DocumentObject):
         return planarSection
 
     def getVectorSlice(self, z: float, returnCoordPaths: bool = True,
-                       simplificationFactor:bool = None, simplificationPreserveTopology: Optional[bool] = True) -> Any:
+                       fixPolygons: bool = True,
+                       simplificationFactor:float = None, simplificationPreserveTopology: Optional[bool] = True,
+                       simplificationFactorMode:str = 'absolute') -> Any:
         """
         The vector slice is created by using `trimesh` to slice the mesh into a polygon
 
         :param z: The slice's z-position
         :param returnCoordPaths: If True returns a list of closed paths representing the polygon, otherwise Shapely Polygons
+        :param fixPolygons: Fixes any polygons during slicing by offset by epsilon value
         :param simplificationFactor:  Simplification factor used for the boundary
         :param simplificationPreserveTopology:  Preserves the slice's topology when using simplification algorithm
+        :param simplificationFactorMode: Set mode ('absolute', 'line') for the simplification tolerance calculation
 
         :return: The vector slice at the given z level
         """
@@ -412,12 +511,37 @@ class Part(DocumentObject):
         polygons = planarSection.polygons_full
 
         if simplificationFactor:
+
+            if simplificationFactorMode == 'absolute':
+                simpFactor = simplificationFactor
+            elif simplificationFactorMode == 'bound':
+                meanLen = np.mean(planarSection.extents)
+                simpFactor = simplificationFactor * meanLen
+            elif simplificationFactorMode == 'line':
+                pass
+            else:
+                raise Exception('simplification mode invalid')
+
             simpPolys = []
 
             for polygon in polygons:
-                simpPolys.append(polygon.simplify(simplificationFactor, preserve_topology=simplificationPreserveTopology))
+
+                if simplificationFactorMode == 'line':
+                    coords = np.vstack([polygon.exterior.xy[0], polygon.exterior.xy[1]]).T
+                    delta = np.diff(coords, axis=0)
+                    dist = np.sqrt(delta[:, 0] * delta[:, 0] + delta[:, 1] * delta[:, 1])
+                    simpFactor = np.mean(dist) * simplificationFactor
+
+                simpPolys.append(polygon.simplify(simpFactor, preserve_topology=simplificationPreserveTopology))
 
             polygons = simpPolys
+
+        # fix polygon
+        if fixPolygons:
+            fixPolys = []
+            for polygon in polygons:
+                fixPolys.append(polygon.buffer(Part.POLYGON_FIX_EPSILON))
+            polygons = fixPolys
 
         if returnCoordPaths:
             return self.path2DToPathList(polygons)
